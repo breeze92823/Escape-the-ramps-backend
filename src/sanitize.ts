@@ -1,8 +1,8 @@
 import {
-  CURRENCY_MAX, REBIRTHS_MAX, DISTANCE_MAX, PLAY_SECONDS_MAX, OWNED_MAX, PETS_MAX, PET_TIERS_MAX,
-  PET_SLOTS_MAX, GIFTS_MAX, POTION_KINDS_MAX, POTION_COUNT_MAX, ID_PATTERN,
+  CURRENCY_MAX, SPEED_MAX, LEVEL_MAX, REBIRTHS_MAX, PLAY_SECONDS_MAX, OWNED_MAX, ID_PATTERN, STAGES_MAX,
+  PARTS_KINDS_MAX, PART_COUNT_MAX, TUNE_SLOTS_MAX, DAILY_DAYS, NITRO_BANK_MAX, MEDAL_MAX, FALLS_MAX,
 } from "./constants.js";
-import type { PlayerDoc, SavedPet } from "./db.js";
+import type { PlayerDoc, SavedRun } from "./db.js";
 
 export function finite(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v);
@@ -18,82 +18,84 @@ function isObject(v: unknown): v is Record<string, unknown> {
 }
 const isId = (v: unknown): v is string => typeof v === "string" && ID_PATTERN.test(v);
 
-// Catalog ids (boats, engines, partners, trails): slug strings, no duplicates, bounded count.
+// Catalog ids (trucks): slug strings, no duplicates, bounded count.
 export function sanitizeIds(raw: unknown, max = OWNED_MAX): string[] {
   if (!Array.isArray(raw)) return [];
   return [...new Set(raw.filter(isId))].slice(0, max);
 }
 
-// Owned pets { kind, tier, equipped, locked }: slug kinds, integer tiers, at most PETS_MAX, and no
-// more than `slots` of them equipped (the extra ones are unequipped, never dropped).
-export function sanitizePets(raw: unknown, slots = PET_SLOTS_MAX): SavedPet[] {
-  if (!Array.isArray(raw)) return [];
-  const out: SavedPet[] = [];
-  let equipped = 0;
-  for (const p of raw) {
-    if (out.length >= PETS_MAX) break;
-    if (!isObject(p) || !isId(p.kind) || !Number.isInteger(p.tier) || (p.tier as number) < 0 || (p.tier as number) >= PET_TIERS_MAX) continue;
-    const on = p.equipped === true && equipped < slots;
-    if (on) equipped++;
-    out.push({ kind: p.kind, tier: p.tier as number, equipped: on, locked: p.locked === true });
-  }
-  return out;
-}
-
-// Potion counts { id: n }: slug ids, whole non-negative counts, bounded kinds.
-function sanitizePotions(raw: unknown): Record<string, number> {
+// { id: n } counts (tuning parts, shop stock): slug ids, whole counts >= 1, bounded kinds.
+export function sanitizeCounts(raw: unknown, max = PARTS_KINDS_MAX): Record<string, number> {
   const out: Record<string, number> = {};
   if (!isObject(raw)) return out;
   for (const [id, n] of Object.entries(raw)) {
-    if (Object.keys(out).length >= POTION_KINDS_MAX) break;
-    if (isId(id) && finite(n)) out[id] = clampInt(n, POTION_COUNT_MAX);
+    if (Object.keys(out).length >= max) break;
+    if (isId(id) && finite(n) && n >= 1) out[id] = clampInt(n, PART_COUNT_MAX);
   }
   return out;
 }
 
-// One owned list + its equipped id. The equipped one must be owned ("" = none); when this save
-// doesn't carry the list, trust the id's shape only.
-function ownedPair(raw: Record<string, unknown>, out: Partial<PlayerDoc>, listKey: "boats" | "engines" | "partners" | "trails", idKey: "boat" | "engine" | "partner" | "trail") {
-  if (raw[listKey] !== undefined) out[listKey] = sanitizeIds(raw[listKey]);
-  const id = raw[idKey];
-  const owned = out[listKey];
-  if (id === "") out[idKey] = "";
-  else if (isId(id) && (!owned || owned.includes(id))) out[idKey] = id;
+// Stage records keyed by the stage number (1..STAGES_MAX).
+export function sanitizeRuns(raw: unknown): Record<string, SavedRun> {
+  const out: Record<string, SavedRun> = {};
+  if (!isObject(raw)) return out;
+  for (const [k, r] of Object.entries(raw)) {
+    const n = Number(k);
+    if (!Number.isInteger(n) || n < 1 || n > STAGES_MAX || !isObject(r)) continue;
+    out[String(n)] = {
+      best: finite(r.best) ? Math.min(PLAY_SECONDS_MAX, Math.max(0, r.best)) : 0,
+      medal: finite(r.medal) ? clampInt(r.medal, MEDAL_MAX) : 0,
+      falls: finite(r.falls) ? clampInt(r.falls, FALLS_MAX) : 0,
+      clears: finite(r.clears) ? clampInt(r.clears, FALLS_MAX) : 0,
+    };
+  }
+  return out;
 }
+
+const dateStr = (v: unknown): string => (typeof v === "string" && v.length <= 16 && /^[0-9-]*$/.test(v) ? v : "");
 
 // The game is client-authoritative -- no server-side gameplay validation. What IS enforced:
 // shape and bounds, so a malformed payload can never corrupt this player's own Mongo document.
-// A forged number can only ever affect the sender's own save.
+// A forged number can only ever affect the sender's own save (and its leaderboard rows).
 export function sanitizeProgress(raw: unknown): Partial<PlayerDoc> | null {
   if (!isObject(raw)) return null;
   const out: Partial<PlayerDoc> = {};
 
-  if (finite(raw.trophies)) out.trophies = clampNum(raw.trophies, CURRENCY_MAX);
+  if (finite(raw.wins)) out.wins = clampNum(raw.wins, CURRENCY_MAX);
+  if (finite(raw.gears)) out.gears = clampNum(raw.gears, CURRENCY_MAX);
   if (finite(raw.gems)) out.gems = clampNum(raw.gems, CURRENCY_MAX);
-  if (finite(raw.energy)) out.energy = clampNum(raw.energy, CURRENCY_MAX);
+  if (finite(raw.speed)) out.speed = clampNum(raw.speed, SPEED_MAX);
+  if (finite(raw.xp)) out.xp = clampNum(raw.xp, SPEED_MAX);
+  if (finite(raw.level)) out.level = clampInt(raw.level, LEVEL_MAX, 1);
   if (finite(raw.rebirths)) out.rebirths = clampInt(raw.rebirths, REBIRTHS_MAX);
-  if (typeof raw.autoRebirth === "boolean") out.autoRebirth = raw.autoRebirth;
-  if (finite(raw.bestDistance)) out.bestDistance = clampNum(raw.bestDistance, DISTANCE_MAX);
+  if (finite(raw.bestStage)) out.bestStage = clampInt(raw.bestStage, STAGES_MAX);
+  if (typeof raw.magnet === "boolean") out.magnet = raw.magnet;
+  if (typeof raw.chestDay === "string") out.chestDay = dateStr(raw.chestDay);
   if (finite(raw.playtime)) out.playtime = clampInt(raw.playtime, PLAY_SECONDS_MAX);
   if (finite(raw.lastSeen)) out.lastSeen = clampInt(raw.lastSeen, Date.now() + 10 * 60 * 1000);
 
-  ownedPair(raw, out, "boats", "boat");
-  ownedPair(raw, out, "engines", "engine");
-  ownedPair(raw, out, "partners", "partner");
-  ownedPair(raw, out, "trails", "trail");
+  if (raw.owned !== undefined) out.owned = sanitizeIds(raw.owned);
+  if (isId(raw.car) && (!out.owned || out.owned.includes(raw.car))) out.car = raw.car;
 
-  if (finite(raw.petSlots)) out.petSlots = clampInt(raw.petSlots, PET_SLOTS_MAX, 1);
-  if (finite(raw.petStorage)) out.petStorage = clampInt(raw.petStorage, PETS_MAX, 1);
-  if (raw.pets !== undefined) out.pets = sanitizePets(raw.pets, out.petSlots ?? PET_SLOTS_MAX);
-  if (raw.eggsSeen !== undefined) out.eggsSeen = sanitizeIds(raw.eggsSeen);
-  if (raw.world === "" || isId(raw.world)) out.world = raw.world as string;
-  if (raw.worldsUnlocked !== undefined) out.worldsUnlocked = sanitizeIds(raw.worldsUnlocked);
-
-  if (finite(raw.giftTime)) out.giftTime = clampInt(raw.giftTime, PLAY_SECONDS_MAX);
-  if (raw.giftsClaimed !== undefined) {
-    const claimed = Array.isArray(raw.giftsClaimed) ? raw.giftsClaimed.filter((i): i is number => Number.isInteger(i) && i >= 0 && i < GIFTS_MAX) : [];
-    out.giftsClaimed = [...new Set(claimed)];
+  if (raw.parts !== undefined) out.parts = sanitizeCounts(raw.parts);
+  if (raw.equipped !== undefined) {
+    // Never more equipped than owned, whatever the payload claims.
+    const eq = sanitizeCounts(raw.equipped);
+    if (out.parts) for (const id of Object.keys(eq)) eq[id] = Math.min(eq[id], out.parts[id] ?? 0);
+    out.equipped = Object.fromEntries(Object.entries(eq).filter(([, n]) => n > 0));
   }
-  if (raw.potions !== undefined) out.potions = sanitizePotions(raw.potions);
+  if (finite(raw.tuneSlots)) out.tuneSlots = clampInt(raw.tuneSlots, TUNE_SLOTS_MAX, 1);
+  if (isObject(raw.tuneShop) && finite(raw.tuneShop.period)) {
+    out.tuneShop = { period: clampInt(raw.tuneShop.period, 1e12, -1), sold: sanitizeCounts(raw.tuneShop.sold, 16) };
+  }
+  if (isObject(raw.daily)) {
+    out.daily = { next: finite(raw.daily.next) ? clampInt(raw.daily.next, DAILY_DAYS - 1) : 0, last: dateStr(raw.daily.last) };
+  }
+  if (finite(raw.winsBoostUntil)) out.winsBoostUntil = clampInt(raw.winsBoostUntil, Date.now() + 365 * 864e5);
+  if (typeof raw.vip === "boolean") out.vip = raw.vip;
+  if (finite(raw.balloonsUntil)) out.balloonsUntil = clampInt(raw.balloonsUntil, Date.now() + 365 * 864e5);
+  if (finite(raw.wingsUntil)) out.wingsUntil = clampInt(raw.wingsUntil, Date.now() + 365 * 864e5);
+  if (finite(raw.nitroBank)) out.nitroBank = clampNum(raw.nitroBank, NITRO_BANK_MAX);
+  if (raw.runs !== undefined) out.runs = sanitizeRuns(raw.runs);
   return out;
 }
