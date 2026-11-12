@@ -41,9 +41,17 @@ export const LEADERBOARD_EVERY_MS = 30 * 1000;
 // One `giftPart` per sender per this long (WorldRoom); extra gifts are dropped without a reply.
 export const GIFT_EVERY_MS = 2000;
 
+// Presence (presence.ts): pose bounds in metres and m/s, matching the hub + 20 stages.
+export const POSE_BOUNDS = { xy: 20000, speed: 500 };
+
 // Ids from the client's catalogs (cars, tuning parts, rarities): slugs, so nothing odd is stored.
 export const ID_PATTERN = /^[A-Za-z0-9_-]{1,32}$/;
 
 // The client's per-browser fallback id for players who are not signed in to Bloxity.
 // Guests are never persisted.
 export const GUEST_ID_PREFIX = "guest-";
+
+// Friend invites: a player who joins through a friend's invite link (`invited: true` join option)
+// is welcomed (`inviteWelcome`) and the others in the room hear `friendJoined`. Each account can
+// claim the joiner reward once per INVITE_COOLDOWN_MS, so re-joining cannot farm it.
+export const INVITE_COOLDOWN_MS = 30 * 60 * 1000;
