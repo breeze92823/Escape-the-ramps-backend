@@ -7,6 +7,16 @@ export const PlayerState = schema(
     username: t.string().default(""), // client-reported Bloxity displayName/username, not validated
     signedIn: t.boolean().default(false), // has a Bloxity id: only signed-in players are saved
     pfp: t.string().default(""), // Bloxity profile picture URL ("" = none), for the others' racer heads
+    // Presence (presence.ts, `pose`): what the others draw in the world.
+    x: t.float32().default(0), // truck position (metres)
+    y: t.float32().default(0),
+    z: t.float32().default(0),
+    yaw: t.float32().default(0), // heading, rad
+    speed: t.float32().default(0), // signed forward speed, m/s (wheel spin)
+    steer: t.float32().default(0), // -1..1
+    car: t.string().default(""), // equipped truck id (client CARS), "" = default
+    air: t.boolean().default(false), // airborne
+    spawned: t.boolean().default(false), // a pose has arrived: the others only draw spawned players
   },
   "PlayerState",
 );

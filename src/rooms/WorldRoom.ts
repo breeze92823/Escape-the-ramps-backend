@@ -1,9 +1,11 @@
 import { Room, Client, CloseCode } from "colyseus";
 import { WorldState, PlayerState } from "./schema/WorldState.js";
-import { GIFT_EVERY_MS, GUEST_ID_PREFIX, ID_PATTERN, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS } from "../constants.js";
+import { GIFT_EVERY_MS, INVITE_COOLDOWN_MS, GUEST_ID_PREFIX, ID_PATTERN, LEADERBOARD_EVERY_MS, NAME_MAX, PFP_MAX_LEN, RECONNECT_SECONDS, ROOM_MAX_CLIENTS } from "../constants.js";
 import { getPlayers, type PlayerDoc } from "../db.js";
 import { sanitizeProgress } from "../sanitize.js";
+import { canVerify, verifyToken } from "../bloxity.js";
 import { ranksOf, topBoards } from "../leaderboard.js";
+import { applyPose } from "../presence.js";
 
 function sanitizeName(raw: unknown): string {
   return typeof raw === "string" ? raw.slice(0, NAME_MAX) : "";
@@ -35,6 +37,8 @@ export class WorldRoom extends Room<{ state: WorldState }> {
   private loaded = new Set<string>();
   // sessionId -> when it last sent a gift (rate limit, GIFT_EVERY_MS).
   private lastGift = new Map<string, number>();
+  // user id (or session id for guests) -> when the joiner reward was last handed out.
+  private inviteClaims = new Map<string, number>();
   messages = {
     // Debounced push of the client's whole progress. Upserts, so a first save creates the document.
     saveProgress: async (client: Client, msg: unknown) => {
@@ -64,14 +68,19 @@ export class WorldRoom extends Room<{ state: WorldState }> {
         console.warn("[WorldRoom] saveProgress failed", err);
       }
     },
+    // The sender's truck pose ~10x/s, relayed through the roster so everyone draws it.
+    pose: (client: Client, msg: unknown) => {
+      const p = this.state.players.get(client.sessionId);
+      if (p) applyPose(p, msg);
+    },
     // Re-states identity after a login/logout that happens AFTER join (a guest who signs in
     // mid-session). The server answers with progress/noProgress for the new identity.
-    identify: (client: Client, msg: { username?: string; userId?: string; pfp?: string }) => {
+    identify: (client: Client, msg: { username?: string; userId?: string; pfp?: string; token?: string }) => {
       const p = this.state.players.get(client.sessionId);
       if (!p) return;
       if (typeof msg?.username === "string") p.username = sanitizeName(msg.username);
       if (typeof msg?.pfp === "string") p.pfp = sanitizePfp(msg.pfp);
-      if (typeof msg?.userId === "string") this.setUserId(client, p, msg.userId);
+      if (typeof msg?.userId === "string" || typeof msg?.token === "string") void this.identifyFrom(client, p, msg);
     },
     // Gift a tuning part to another player in this room. The sender's client already paid (gems)
     // and removed nothing else; the server only relays (client-authoritative). Malformed or
@@ -122,12 +131,45 @@ export class WorldRoom extends Room<{ state: WorldState }> {
     }
   }
 
-  onJoin(client: Client, options?: { username?: string; userId?: string; pfp?: string; pose?: unknown; loadout?: unknown; avatar?: string }) {
+  // The account behind a join / identify. Deployed (BLOXITY_API_URL set) only a verified Bloxity
+  // game token counts and a client-sent userId is ignored; a failed check plays as a guest.
+  // Locally there is nothing to verify against, so the client's id is used (dev only).
+  private async identifyFrom(client: Client, p: PlayerState, opts: { userId?: unknown; token?: unknown } | undefined) {
+    if (!canVerify()) return this.setUserId(client, p, typeof opts?.userId === "string" ? opts.userId : "");
+    const user = await verifyToken(opts?.token);
+    if (this.state.players.get(client.sessionId) !== p) return; // left meanwhile
+    if (user) {
+      if (user.username) p.username = sanitizeName(user.username);
+      if (user.pfp && !p.pfp) p.pfp = sanitizePfp(user.pfp);
+    }
+    this.setUserId(client, p, user?.id ?? "");
+  }
+
+  onJoin(client: Client, options?: { username?: string; userId?: string; token?: string; pfp?: string; invited?: boolean; pose?: unknown; loadout?: unknown; avatar?: string }) {
     const p = new PlayerState();
     p.username = sanitizeName(options?.username);
     p.pfp = sanitizePfp(options?.pfp);
+    applyPose(p, options?.pose);
     this.state.players.set(client.sessionId, p);
-    this.setUserId(client, p, typeof options?.userId === "string" ? options.userId : "");
+    // Welcome after the identity is known, so the once-per-cooldown reward is keyed to the account.
+    const invited = options?.invited === true;
+    void this.identifyFrom(client, p, options).then(() => {
+      if (invited && this.state.players.get(client.sessionId) === p && this.clients.length > 1) this.welcomeInvited(client, p);
+    });
+  }
+
+  // Joined through a friend's invite into a room that already had people: the joiner gets the
+  // reward (once per cooldown per account) and everyone else hears who arrived.
+  private welcomeInvited(client: Client, p: PlayerState) {
+    const key = this.userIds.get(client.sessionId) || client.sessionId;
+    const now = Date.now();
+    const fresh = now - (this.inviteClaims.get(key) ?? -Infinity) >= INVITE_COOLDOWN_MS;
+    if (fresh) this.inviteClaims.set(key, now);
+    const name = p.username || "Player";
+    for (const c of this.clients) {
+      if (c.sessionId === client.sessionId) client.send("inviteWelcome", { reward: fresh, friends: this.clients.length - 1 });
+      else if (fresh) c.send("friendJoined", { name });
+    }
   }
 
   // A deliberate `room.leave()` closes with CONSENTED -- drop the player at once. Anything
